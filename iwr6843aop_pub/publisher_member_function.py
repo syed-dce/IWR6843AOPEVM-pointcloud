@@ -15,6 +15,7 @@
 #from detected_points import Detected_Points
 import rclpy
 from rclpy.node import Node
+import os
 import time
 import numpy as np
 import threading
@@ -32,6 +33,8 @@ MAGIC_WORD_ARRAY = np.array([2, 1, 4, 3, 6, 5, 8, 7])
 MAGIC_WORD = b'\x02\x01\x04\x03\x06\x05\x08\x07'
 MSG_AZIMUT_STATIC_HEAT_MAP = 8
 ms_per_frame = 9999.0
+default_cfg = os.path.dirname(os.path.realpath(__file__)).replace("install/iwr6843aop_pub/lib/python3.8/site-packages/iwr6843aop_pub", "/src/iwr6843aop_pub/cfg_files") + "/" + "90deg_noGroup_18m_30Hz.cfg"
+
 
 class TI:
     def __init__(self, sdk_version=3.4,  cli_baud=115200,data_baud=921600, num_rx=4, num_tx=3,
@@ -62,7 +65,7 @@ class TI:
                 print("Found frameCfg, milliseconds per frame is ", i.split()[5])
             time.sleep(0.01)
 
-    def _initialize(self, config_file='/home/nm/dev_ws/src/iwr6843aop_pub/iwr6843aop_pub/profile_scatter.cfg'):
+    def _initialize(self, config_file=default_cfg):
         config = [line.rstrip('\r\n') for line in open(config_file)]
         if self.connected:
             self._configure_radar(config)
@@ -254,15 +257,14 @@ class TI:
 
 class Detected_Points:
 
-    def data_stream_iterator(self,cli_loc='/dev/ttyUSB0',data_loc='/dev/ttyUSB1',total_frames=300):#'COM4',data_loc='COM3',total_frames=300):
+    def data_stream_iterator(self,cli_loc='/dev/ttyUSB0',data_loc='/dev/ttyUSB1'):#'COM4',data_loc='COM3'):
         
         MAGIC_WORD = b'\x02\x01\x04\x03\x06\x05\x08\x07'
         ti=TI(cli_loc=cli_loc,data_loc=data_loc)
-        nframe=0
-        interval=0.05
+        interval=ms_per_frame / 1000.0#0.05
         data=b''
         warn=0
-        while 1:#nframe<total_frames:
+        while 1:
 
             time.sleep(interval)
             byte_buffer=ti._read_buffer()
@@ -271,7 +273,7 @@ class Detected_Points:
                 warn+=1
             else:
                 warn=0
-            if(warn>10):#连续10次空读取则退出
+            if(warn>10):#连续10次空读取则退出 / after 10 empty frames
                 print("Wrong")
                 break
         
@@ -290,64 +292,63 @@ class Detected_Points:
             ret=points[:,:3]
 
             yield ret
-            nframe+=1
 
         print("Close")
         ti.close()
 
 
-x = []
-y = []
-z = []
+xyzdata = []
 xyz_mutex = False # True = locked, false = open
-#frameCfg = ms_per_frame
 
 class MinimalPublisher(Node):
     def __init__(self):
         super().__init__('iwr6843_pcl_pub')
-        self.publisher_ = self.create_publisher(PointCloud2, 'iwr6843_scan/pcl', 10)
+        self.publisher_ = self.create_publisher(PointCloud2, 'iwr6843_scan/pcl', 1)
         global ms_per_frame
         timer_period = ms_per_frame / 1000.0#0.05  # 0.033 seconds
         self.timer = self.create_timer(timer_period, self.timer_callback)
 
 
     def timer_callback(self):
-        global x, y, z, xyz_mutex
+        global xyz_mutex, xyzdata
         while xyz_mutex == True:
             pass
         xyz_mutex == True
-        cloud_arr = np.asarray([x,y,z]).transpose().astype(np.float32)
+        cloud_arr = np.asarray(xyzdata).astype(np.float32) # on form [[x,y,z],[x,y,z],[x,y,z]..]
         pcl_msg = PointCloud2()
         pcl_msg.header = std_msgs.msg.Header()
         pcl_msg.header.stamp = self.get_clock().now().to_msg()
         pcl_msg.header.frame_id = 'map'
-        pcl_msg.height = 3
-        pcl_msg.width = len(x)
+        pcl_msg.height = 1 # because unordered cloud
+        pcl_msg.width = cloud_arr.shape[0] # number of points in cloud
+        # define interpretation of pointcloud message (offset is in bytes, float32 is 4 bytes)
         pcl_msg.fields =   [PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
                             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
                             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1)]
-        pcl_msg.point_step = cloud_arr.dtype.itemsize 
-        pcl_msg.row_step = pcl_msg.point_step*cloud_arr.shape[1] 
-        #pcl_msg.is_dense = all([np.isfinite(cloud_arr[fname]).all() for fname in cloud_arr.dtype.names])
+        #cloud_msg.is_bigendian = False # assumption        
+        pcl_msg.point_step = cloud_arr.dtype.itemsize*cloud_arr.shape[1] #size of 1 point (float32 * dimensions (3 when xyz))
+        pcl_msg.row_step = pcl_msg.point_step*cloud_arr.shape[0] # only 1 row because unordered
+        pcl_msg.is_dense = True
         pcl_msg.data = cloud_arr.tostring()
-
         self.publisher_.publish(pcl_msg)
         xyz_mutex = False
-        #self.get_logger().info('Publishing "%s" points' % len(cloud_arr))#cloud_arr)
+        self.get_logger().info('Publishing %s points' % cloud_arr.shape[0] )
 
 
 class iwr6843_interface(object):
     def __init__(self):
         detected_points=Detected_Points()
-        self.stream = detected_points.data_stream_iterator('/dev/ttyUSB0','/dev/ttyUSB1',1000)#'COM4','COM3',1000)
+        self.stream = detected_points.data_stream_iterator('/dev/ttyUSB0','/dev/ttyUSB1')#'COM4','COM3',1000)
 
     def update(self, i):
         data=next(self.stream)
-        global x, y, z, xyz_mutex
+        global xyz_mutex, xyzdata
         while xyz_mutex == True:
             pass
         xyz_mutex = True
-        x, y, z = np.transpose(data)
+        #print("New set of points")
+        #print(data)
+        xyzdata = data
         xyz_mutex = False
 
 
@@ -380,4 +381,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
