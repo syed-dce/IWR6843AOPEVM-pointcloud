@@ -12,7 +12,7 @@ IWR6843AOPEVM  mmWave radar
 Installation:-  
 Clone the repo to workspace  
 cd ~/ros2_ws/src/  
-git clone https://github.com/nhma20/iwr6843aop_pub.git  
+git clone https://github.com/syed-dce/IWR6843AOPEVM-pointcloud.git  
 Colcon build package  
 cd ~/ros2_ws/  
 colcon build --packages-select iwr6843aop_pub  
